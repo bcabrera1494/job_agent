@@ -484,8 +484,155 @@ def audit_text(text: str, facts: str, job: Job, forbidden: list[str]) -> list[st
 # --------------------------------------------------------------------------- #
 # Output
 # --------------------------------------------------------------------------- #
+SUMMARY_HEADERS = ["Date found", "Company", "Role", "Salary", "Fit", "Verdict", "Location",
+                   "Link", "Flags", "Application file", "My status"]
+POSTING_HEADERS = ["Source", "Company", "Role", "Location", "Salary", "Link", "Status"]
+LINK_COL_SUMMARY = (7,)      # zero-based index of the "Link" column
+LINK_COL_POSTINGS = (5,)
+
+
 def slug(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:60]
+
+
+def csv_safe(v) -> str:
+    v = "" if v is None else str(v)
+    return "'" + v if v[:1] in ("=", "+", "-", "@") else v   # stops spreadsheet formula injection
+
+
+def write_csv(path: pathlib.Path, headers: list[str], rows: list[list]):
+    with open(path, "w", newline="", encoding="utf-8-sig") as fh:   # utf-8-sig: Excel-friendly
+        w = csv.writer(fh)
+        w.writerow(headers)
+        for r in rows:
+            w.writerow([csv_safe(c) for c in r])
+
+
+def write_xlsx(path: pathlib.Path, headers: list[str], rows: list[list],
+               link_cols=(), append: bool = False) -> pathlib.Path | None:
+    """Write (or append to) an .xlsx file. Returns the path written, or None if openpyxl is missing."""
+    try:
+        from openpyxl import Workbook, load_workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        log.warning("openpyxl is not installed, so no .xlsx was written (CSV was). "
+                    "Run: pip install openpyxl")
+        return None
+
+    fresh = True
+    if append and path.exists():
+        try:
+            wb = load_workbook(path)
+            ws = wb.active
+            fresh = False
+        except Exception as e:
+            log.warning("could not open existing %s (%s); starting a new file", path.name, e)
+    if fresh:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Jobs"
+        ws.append(headers)
+        for c in ws[1]:
+            c.font = Font(bold=True, color="FFFFFF")
+            c.fill = PatternFill("solid", fgColor="305496")
+            c.alignment = Alignment(vertical="center")
+        ws.freeze_panes = "A2"
+
+    for r in rows:
+        ws.append(["" if c is None else c for c in r])
+        for idx, cell in enumerate(ws[ws.max_row]):
+            if isinstance(cell.value, str):
+                if cell.value[:1] in ("=", "+", "-", "@"):
+                    cell.data_type = "s"                    # treat as text, never a formula
+                elif idx in link_cols and cell.value.startswith("http"):
+                    cell.hyperlink = cell.value
+                    cell.font = Font(color="0563C1", underline="single")
+    if fresh:
+        for i, h in enumerate(headers, start=1):
+            width = max([len(str(h))] + [len(str(r[i - 1])) for r in rows if i - 1 < len(r)] + [8])
+            ws.column_dimensions[get_column_letter(i)].width = min(width + 2, 60)
+    ws.auto_filter.ref = ws.dimensions
+
+    try:
+        wb.save(path)
+        return path
+    except PermissionError:      # file is open in Excel
+        alt = path.with_name(f"{path.stem}_new{path.suffix}")
+        wb.save(alt)
+        log.warning("%s is open in another program; saved %s instead", path.name, alt.name)
+        return alt
+
+
+def job_rows(jobs: list[Job], files: dict[str, pathlib.Path], date: str) -> list[list]:
+    rows = []
+    for j in sorted(jobs, key=lambda j: j.fit_score if j.fit_score is not None else -1, reverse=True):
+        f = files.get(j.key)
+        rows.append([date, j.company, j.title, j.salary_display,
+                     "" if j.fit_score is None else j.fit_score, j.fit_verdict, j.location,
+                     j.url, "; ".join(j.flags), f.name if f else "", ""])
+    return rows
+
+
+def update_tracker(base: pathlib.Path, rows: list[list]) -> list[pathlib.Path]:
+    """Cumulative list of every match across days. Appends, so your 'My status' edits survive."""
+    written = []
+    csv_path = base / "job_tracker.csv"
+    new_file = not csv_path.exists()
+    with open(csv_path, "a", newline="", encoding="utf-8-sig" if new_file else "utf-8") as fh:
+        w = csv.writer(fh)
+        if new_file:
+            w.writerow(SUMMARY_HEADERS)
+        for r in rows:
+            w.writerow([csv_safe(c) for c in r])
+    written.append(csv_path)
+    x = write_xlsx(base / "job_tracker.xlsx", SUMMARY_HEADERS, rows, LINK_COL_SUMMARY, append=True)
+    if x:
+        written.append(x)
+    return written
+
+
+def write_reports(out_dir: pathlib.Path, base: pathlib.Path, stamp: str, date: str,
+                  jobs: list[Job], files: dict[str, pathlib.Path], stats: dict,
+                  all_rows: list[list], notes: list[str], prefix: str = "summary",
+                  track: bool = True) -> list[pathlib.Path]:
+    """Always writes a report, even when zero jobs matched, so a run is never silent."""
+    rows = job_rows(jobs, files, date)
+    md = [f"# Remote job matches: {stamp}", ""]
+    md += [f"> {n}" for n in notes]
+    md += ["", f"Fetched **{stats['fetched']}** postings. **{len(jobs)}** new matches.", ""]
+    if stats["rejected"]:
+        md += ["Why other postings were filtered out:", ""]
+        md += [f"- {k}: {v}" for k, v in sorted(stats["rejected"].items(), key=lambda kv: -kv[1])]
+        md += [""]
+    if rows:
+        md += ["| Company | Role | Salary | Fit | Flags | Application |", "|---|---|---|---|---|---|"]
+        for r in rows:
+            link = f"[{r[9]}](jobs/{r[9]})" if r[9] else "not tailored"
+            md.append(f"| {r[1]} | [{r[2]}]({r[7]}) | {r[3]} | {r[4] if r[4] != '' else 'n/a'} | "
+                      f"{r[8]} | {link} |")
+    else:
+        md.append("No new matching jobs this run.")
+
+    written: list[pathlib.Path] = []
+    p = out_dir / f"{prefix}_{stamp}.md"
+    p.write_text("\n".join(md) + "\n", encoding="utf-8")
+    written.append(p)
+    p = out_dir / f"{prefix}_{stamp}.csv"
+    write_csv(p, SUMMARY_HEADERS, rows)
+    written.append(p)
+    x = write_xlsx(out_dir / f"{prefix}_{stamp}.xlsx", SUMMARY_HEADERS, rows, LINK_COL_SUMMARY)
+    if x:
+        written.append(x)
+    p = out_dir / f"all_postings_{stamp}.csv"          # every posting seen + why it was kept/dropped
+    write_csv(p, POSTING_HEADERS, all_rows)
+    written.append(p)
+    if track:
+        done = [j for j in jobs if not any("failed" in f.lower() or "not scored" in f.lower()
+                                           for f in j.flags)]
+        if done:
+            written += update_tracker(base, job_rows(done, files, date))
+    return written
 
 
 def write_job_file(folder: pathlib.Path, job: Job, t: dict, issues: list[str]) -> pathlib.Path:
@@ -514,30 +661,6 @@ def write_job_file(folder: pathlib.Path, job: Job, t: dict, issues: list[str]) -
     return path
 
 
-def write_summary(folder: pathlib.Path, jobs: list[Job], files: dict[str, pathlib.Path], date: str):
-    print(f"DEBUG: write_summary started! Folder: {folder}, Jobs count: {len(jobs)}") #debug line
-    folder.mkdir(parents=True, exist_ok=True)
-    suffix = "_dryrun" if date.endswith("-dryrun") else ""
-    date = date.replace("-dryrun", "")
-    jobs = sorted(jobs, key=lambda j:j.fit_score or 0, reverse=True)
-    md = [f"# Remote job matches: {date}", "",
-          "| Company | Role | Salary | Fit | Flags | Application |",
-          "|---|---|---|---|---|---|"]
-    for j in jobs:
-        f = files.get(j.key)
-        link = f"[{f.name}](jobs/{f.name})" if f else "not tailored"
-        fit = f"{j.fit_score}" if j.fit_score is not None else "n/a"
-        md.append(f"| {j.company} | [{j.title}]({j.url}) | {j.salary_display} | {fit} | "
-                  f"{'; '.join(j.flags) or ''} | {link} |")
-    (folder / f"summary{suffix}.md").write_text("\n".join(md) + "\n", encoding="utf-8")
-    with open(folder / f"summary{suffix}.csv", "w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh)
-        w.writerow(["company", "title", "salary", "fit", "verdict", "location", "url", "flags"])
-        for j in jobs:
-            w.writerow([j.company, j.title, j.salary_display, j.fit_score, j.fit_verdict,
-                        j.location, j.url, "; ".join(j.flags)])
-    
-
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
@@ -546,60 +669,114 @@ def load_cfg(path: str) -> dict:
         return yaml.safe_load(fh)
 
 
-def run(cfg_path: str, dry_run: bool, limit: int | None):
+def unmark_seen(db, key: str):
+    db.execute("DELETE FROM seen WHERE k=?", (key,))
+    db.commit()
+
+
+def run(cfg_path: str, dry_run: bool, limit: int | None, allow_unknown_salary: bool = False):
     cfg = load_cfg(cfg_path)
-    base = pathlib.Path(cfg_path).parent
+    if allow_unknown_salary:
+        cfg["profile"]["allow_unknown_salary"] = True
+    base = pathlib.Path(cfg_path).resolve().parent
     facts = (base / cfg["profile"]["resume_facts"]).read_text(encoding="utf-8")
-    today = dt.date.today().isoformat()
+    now = dt.datetime.now()
+    today, stamp = now.date().isoformat(), now.strftime("%Y-%m-%d_%H%M%S")
     out_dir = base / cfg.get("output_dir", "output") / today
     (out_dir / "jobs").mkdir(parents=True, exist_ok=True)
     db = open_db(str(base / "seen.db"))
+    prefix = "dryrun" if dry_run else "summary"
 
+    # ---- 1. fetch + filter ------------------------------------------------- #
     candidates: list[Job] = []
     rejected: dict[str, int] = {}
+    all_rows: list[list] = []
     in_run: set[str] = set()
+    fetched = 0
     for job, trusted in gather(cfg):
         if job.key in in_run:            # same posting returned by two feeds/categories
             continue
         in_run.add(job.key)
+        fetched += 1
         ok, why = apply_filters(job, cfg, trusted)
-        if not ok:
+        status = "kept" if ok else f"filtered: {why}"
+        if ok and is_seen(db, job.key):
+            ok, why, status = False, "already seen", "filtered: already seen"
+        if ok:
+            candidates.append(job)
+        else:
             rejected[why] = rejected.get(why, 0) + 1
-            continue
-        if is_seen(db, job.key):
-            rejected["already seen"] = rejected.get("already seen", 0) + 1
-            continue
-        candidates.append(job)
-    log.info("kept %d new jobs; rejected: %s", len(candidates), rejected)
-
+        all_rows.append([job.source, job.company, job.title, job.location,
+                         job.salary_display, job.url, status])
+    log.info("fetched %d; kept %d new; filtered: %s", fetched, len(candidates), rejected)
     if limit:
         candidates = candidates[:limit]
-    if not candidates:
-        print("No new matching jobs today. Existing reports were left untouched.")
-        return
+    stats = {"fetched": fetched, "rejected": rejected}
+
+    notes: list[str] = []
+    if fetched == 0:
+        notes.append("No postings were fetched at all. Check your internet connection, the board "
+                     "slugs in config.yaml, and the log lines above.")
+    elif not candidates and rejected.get("salary unknown", 0) > fetched * 0.5:
+        notes.append("Most postings were dropped because no salary was listed. To include them, "
+                     "run with --allow-unknown-salary (or set allow_unknown_salary: true).")
+
+    def finish(jobs, files, track):
+        paths = write_reports(out_dir, base, stamp, today, jobs, files, stats, all_rows,
+                              notes, prefix=prefix, track=track)
+        for n in notes:
+            print(f"- {n}")
+        print(f"\n{fetched} postings fetched, {len(jobs)} new matches.")
+        print("Files written:")
+        for p in paths:
+            print(f"  {p}")
+
+    # ---- 2. nothing to do, or dry run ------------------------------------- #
     if dry_run:
-        write_summary(out_dir, candidates, {}, today + "-dryrun")
-        for j in candidates:
-            print(f"{j.company} | {j.title} | {j.salary_display} | {j.url}")
-        print(f"\n{len(candidates)} jobs (dry run: nothing marked as seen, no LLM calls).")
+        notes.append("Dry run: nothing was scored, tailored, or marked as seen.")
+        finish(candidates, {}, track=False)
+        return
+    if not candidates:
+        finish([], {}, track=False)
         return
 
-    from anthropic import Anthropic  # imported late so --dry-run/--selftest need no SDK
-    client = Anthropic()  # reads ANTHROPIC_API_KEY
+    # ---- 3. start the LLM client (fall back to an unscored report) --------- #
     llm = cfg["llm"]
+    client = None
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        notes.append("ANTHROPIC_API_KEY is not set, so jobs were NOT scored or tailored. "
+                     "Set it and rerun; these jobs will be picked up again.")
+    else:
+        try:
+            from anthropic import Anthropic
+            client = Anthropic()
+        except Exception as e:
+            notes.append(f"Could not start the Anthropic client ({e}). Run: pip install anthropic. "
+                         "Jobs were NOT scored or tailored, and will be picked up again.")
+    if client is None:
+        for j in candidates:
+            j.flags.append("Not scored")
+        finish(candidates, {}, track=False)       # not marked as seen, so tomorrow retries them
+        return
+
+    # ---- 4. score, then tailor the best few -------------------------------- #
     scored: list[Job] = []
-    for job in candidates[: llm.get("max_scored_per_day", 40)]:
+    cap = llm.get("max_scored_per_day", 40)
+    for job in candidates[:cap]:
         try:
             score_job(client, cfg, facts, job)
             scored.append(job)
+            mark_seen(db, job.key)               # only after a successful score
         except Exception as e:
             log.warning("scoring failed for %s: %s", job.title, e)
-        mark_seen(db, job.key)
+            job.flags.append("Scoring failed: will retry next run")
+            scored.append(job)
+    if len(candidates) > cap:
+        notes.append(f"{len(candidates) - cap} more new jobs were held for tomorrow (daily cap of {cap}).")
 
     shortlist = sorted((j for j in scored if (j.fit_score or 0) >= llm.get("min_fit", 60)
                         and j.fit_verdict != "skip"),
-                       key=lambda j: j.fit_score or 0, reverse=True)
-    shortlist = shortlist[: llm.get("max_tailored_per_day", 3)]
+                       key=lambda j: j.fit_score or 0, reverse=True)[: llm.get("max_tailored_per_day", 3)]
 
     files: dict[str, pathlib.Path] = {}
     forbidden = cfg["profile"].get("forbidden_claims", [])
@@ -612,9 +789,10 @@ def run(cfg_path: str, dry_run: bool, limit: int | None):
             files[job.key] = write_job_file(out_dir / "jobs", job, t, issues)
         except Exception as e:
             log.warning("tailoring failed for %s: %s", job.title, e)
+            job.flags.append("Tailoring failed: will retry next run")
+            unmark_seen(db, job.key)
 
-    write_summary(out_dir, scored, files, today)
-    print(f"Done. {len(scored)} scored, {len(files)} tailored. See {out_dir / 'summary.md'}")
+    finish(scored, files, track=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -681,6 +859,36 @@ def selftest() -> int:
     check("audit notes placeholders", any("placeholder" in i for i in issues), True)
 
     check("parse_json w/ prose", parse_json('Sure:\n{"a": 1}\nDone'), {"a": 1})
+
+    # ---- report files must be written, even with zero matches --------------- #
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        base = pathlib.Path(tmp)
+        out = base / "output"
+        out.mkdir()
+        stats = {"fetched": 3, "rejected": {"salary unknown": 3}}
+        paths = write_reports(out, base, "2026-01-01_0900", "2026-01-01", [], {}, stats, [], [])
+        names = {p.suffix for p in paths}
+        check("zero matches still writes md/csv/xlsx", {".md", ".csv", ".xlsx"} <= names, True)
+        check("zero matches: files exist", all(p.exists() for p in paths), True)
+        j = mk(fit_score=80, fit_verdict="apply", title="=HYPERLINK(\"x\")", url="https://x/1")
+        allrows = [["t", "Acme", j.title, "Remote", j.salary_display, j.url, "kept"]]
+        paths = write_reports(out, base, "2026-01-01_0901", "2026-01-01", [j], {}, stats, allrows, [])
+        rows = list(csv.reader(open(out / "summary_2026-01-01_0901.csv", encoding="utf-8-sig")))
+        check("csv has header + 1 job", len(rows), 2)
+        check("csv neutralizes formulas", rows[1][2].startswith("'="), True)
+        write_reports(out, base, "2026-01-02_0900", "2026-01-02", [mk(fit_score=70, url="https://x/2")],
+                      {}, stats, allrows, [])
+        trk = list(csv.reader(open(base / "job_tracker.csv", encoding="utf-8-sig")))
+        check("tracker accumulates across runs", len(trk), 3)
+        try:
+            from openpyxl import load_workbook
+            ws = load_workbook(base / "job_tracker.xlsx").active
+            check("xlsx tracker has header + 2 rows", ws.max_row, 3)
+            check("xlsx link is clickable", ws.cell(2, 8).hyperlink is not None, True)
+            check("xlsx formula stored as text", ws.cell(2, 3).data_type, "s")
+        except ImportError:
+            print("SKIP xlsx checks (openpyxl not installed)")
     print(f"\n{'ALL TESTS PASSED' if not fails else f'{fails} TEST(S) FAILED'}")
     return 1 if fails else 0
 
@@ -690,9 +898,11 @@ if __name__ == "__main__":
     ap.add_argument("--config", default=str(HERE / "config.yaml"))
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--limit", type=int)
+    ap.add_argument("--allow-unknown-salary", action="store_true",
+                    help="include postings that don't list a salary")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if args.selftest:
         sys.exit(selftest())
-    run(args.config, args.dry_run, args.limit)
+    run(args.config, args.dry_run, args.limit, args.allow_unknown_salary)
