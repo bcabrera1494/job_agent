@@ -13,7 +13,7 @@ tailored resume and cover letter for the best few (default: 3 a day, matching yo
 ## Setup (5 minutes)
 1. `pip install -r requirements.txt`
 2. Get an API key from the Anthropic Console and set it: `export ANTHROPIC_API_KEY=...`
-3. Open `resume_facts.md` and fill in the [brackets] (CA credential, portfolio link, counts).
+3. Open `resume_facts_template.md` and fill in the [brackets] (CA credential, portfolio link, counts).
    This file is the **only** source the model may use. Keep it accurate.
 4. Open `config.yaml` and review company slugs, title filters, and the salary floor.
 5. Try it: `python job_agent.py --selftest` then `python job_agent.py --dry-run`

@@ -13,22 +13,25 @@ resume or letter must come from here. Anything not here becomes a [placeholder].
 - Travel above about 25% is a dealbreaker
 
 ## Current role: [Role Title] [Time Period]
-- 
+- [responsibility descritipon]
 
 ## Past Role 1: [Role Title] [Time Period]
-- 
+- [responsibility descritipon]
+
 
 ## Past Role 2:  [Role Title] [Time Period]
-- 
+- [responsibility descritipon]
 
 ## Technical skills
-- 
+- [responsibility descritipon]
 
 ## Languages
 
 ## Education and licensure
-- 
+- [licensure and education info ]
 
 ## Do NOT claim (not in this candidate's experience)
+- [insert skills to omit]
 
 ## Never mention in any application
+- [insert any factors you do not want mentioned i.e. race, gender identity, mental health, etc.]
