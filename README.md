@@ -74,4 +74,3 @@ the slug to `config.yaml`. A wrong slug just logs a 404 and is skipped.
 - Nonprofits with no public board are best checked manually or via Idealist email alerts.
 - This was tested offline with mocked responses. Live endpoints can change, so run
   `--dry-run` first and check the logs.
-# job_agent
