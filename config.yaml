@@ -1,0 +1,73 @@
+profile:
+  resume_facts: resume_facts.md
+  min_salary: 70000
+  salary_basis: max          # "max": top of range must be >= min_salary; "min": the floor must be
+  allow_unknown_salary: false
+  max_travel_percent: 25
+  home_state: California
+  # Terms the model must never put in your materials unless they are in resume_facts.md
+  forbidden_claims: ["Python", "dbt", "Great Expectations", "HubSpot administration", "PMP", "Gainsight", "Tableau"]
+
+filters:
+  title_include:
+    - "support"
+    - "customer success"
+    - "client success"
+    - "implementation"
+    - "integration"
+    - "onboarding"
+    - "rostering"
+    - "technical account"
+    - "district success"
+    - "partner success"
+    - "solutions? (consultant|specialist)"
+  title_exclude:
+    - "director"
+    - "vice president"
+    - "\\bvp\\b"
+    - "head of"
+    - "chief"
+    - "software engineer"
+    - "data engineer"
+    - "machine learning"
+    - "sales"
+    - "account executive"
+    - "recruit"
+    - "marketing"
+    - "intern\\b"
+    - "contract(or)?\\b"
+  domain_keywords: ["k-12", "k12", "education", "edtech", "school", "district", "teacher",
+                    "student", "learning", "curriculum", "nonprofit", "non-profit"]
+  exclude_location_tokens: ["canada", "united kingdom", "uk", "india", "mexico", "brazil",
+                            "argentina", "colombia", "chile", "philippines", "germany", "france",
+                            "ireland", "australia", "poland", "portugal", "spain", "emea",
+                            "apac", "latam", "europe", "costa rica"]
+
+# Public job-board APIs. A wrong slug just logs a 404 and is skipped.
+# Find a slug in the company's careers URL, e.g.
+#   job-boards.greenhouse.io/khanacademy   -> token: khanacademy
+#   jobs.lever.co/<slug>                   -> slug
+#   jobs.ashbyhq.com/<board>               -> board
+sources:
+  greenhouse:
+    - {company: "Khan Academy", token: "khanacademy"}
+    - {company: "Instructure", token: "instructure"}        # verify slug
+    - {company: "Clever", token: "clever"}                  # verify slug
+    - {company: "GoGuardian", token: "goguardian"}          # verify slug
+    - {company: "Newsela", token: "newsela"}                # verify slug
+    - {company: "Follett Software", token: "follettsoftware"}
+    - {company: "Renaissance", token: "renaissancelearning-nam"}
+  lever: []              # e.g. - {company: "Example", slug: "example"}
+  ashby: []              # e.g. - {company: "Example", board: "example"}
+  remotive:
+    enabled: true
+    categories: ["customer-support", "all-others"]
+
+llm:
+  scoring_model: claude-haiku-5-5
+  tailoring_model: claude-sonnet-5-5
+  min_fit: 60                 # only tailor jobs scoring at least this
+  max_tailored_per_day: 3     # matches your 1-3 applications/day goal
+  max_scored_per_day: 40      # cost cap
+
+output_dir: output
